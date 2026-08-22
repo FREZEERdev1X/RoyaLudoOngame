@@ -613,10 +613,156 @@ app.get("/api/rooms/:code", (req, res) => {
   res.json({ room });
 });
 
-// WebSocket Server
+// Generic REST Action Fallback for Room Events (Dual-Stack Reliability)
+app.post("/api/rooms/action", (req, res) => {
+  try {
+    const { roomCode, type, payload } = req.body;
+    const room = rooms.get(roomCode?.toUpperCase());
+    if (!room) {
+      return res.status(404).json({ error: "Room not found" });
+    }
+
+    switch (type) {
+      case "ROLL_DICE": {
+        const { color, roll, consecutiveSixes } = payload;
+        room.diceValue = roll;
+        room.hasRolled = true;
+        room.currentTurnColor = color;
+        room.consecutiveSixes = consecutiveSixes || 0;
+        room.lastActionTime = Date.now();
+        broadcastToRoom(room.code, {
+          type: "DICE_ROLLED",
+          color,
+          roll,
+          consecutiveSixes: room.consecutiveSixes,
+          room,
+        });
+        break;
+      }
+      case "MOVE_PAWN": {
+        const { color, pawnIndex, roll, newPawns, nextTurnColor, gotExtraTurn, didCapture, didReachHome, isWinner, winnerId } = payload;
+        if (newPawns) room.pawns = newPawns;
+        room.currentTurnColor = nextTurnColor;
+        room.hasRolled = false;
+        room.diceValue = null;
+        if (isWinner && winnerId && !room.winners.includes(winnerId)) {
+          room.winners.push(winnerId);
+        }
+        room.lastActionTime = Date.now();
+        broadcastToRoom(room.code, {
+          type: "PAWN_MOVED",
+          color,
+          pawnIndex,
+          roll,
+          newPawns: room.pawns,
+          nextTurnColor,
+          gotExtraTurn,
+          didCapture,
+          didReachHome,
+          isWinner,
+          winnerId,
+          room,
+        });
+        break;
+      }
+      case "PASS_TURN": {
+        const { nextTurnColor, reason } = payload;
+        room.currentTurnColor = nextTurnColor;
+        room.hasRolled = false;
+        room.diceValue = null;
+        room.lastActionTime = Date.now();
+        broadcastToRoom(room.code, {
+          type: "TURN_PASSED",
+          nextTurnColor,
+          reason,
+          room,
+        });
+        break;
+      }
+      case "START_GAME": {
+        const maxPlayers = room.mode === "2p" ? 2 : room.mode === "3p" ? 3 : 4;
+        const colorsNeeded: ("red" | "green" | "yellow" | "blue")[] =
+          room.mode === "2p"
+            ? ["red", "yellow"]
+            : room.mode === "3p"
+            ? ["red", "green", "yellow"]
+            : ["red", "green", "yellow", "blue"];
+
+        const botNames = ["الروبوت الذكي 🤖", "Falcon_AI 🦅", "الأسطورة 🌟", "Tiger_Bot 🐯"];
+        let botIndex = 0;
+
+        colorsNeeded.forEach((col) => {
+          if (!room.players.some((p) => p.color === col) && room.players.length < maxPlayers) {
+            room.players.push({
+              id: `bot-${col}-${Date.now()}`,
+              name: botNames[botIndex % botNames.length],
+              avatar: `https://api.dicebear.com/7.x/bottts/svg?seed=${col}`,
+              color: col,
+              isBot: true,
+              isReady: true,
+            });
+            botIndex++;
+          }
+        });
+
+        room.status = "playing";
+        room.turnIndex = 0;
+        room.currentTurnColor = room.players[0].color;
+        room.hasRolled = false;
+        room.diceValue = null;
+        room.lastActionTime = Date.now();
+
+        broadcastToRoom(room.code, { type: "GAME_STARTED", room });
+        break;
+      }
+      case "CHAT_MESSAGE": {
+        broadcastToRoom(room.code, { type: "NEW_CHAT", message: payload?.message });
+        break;
+      }
+      case "EMOJI_INTERACTION": {
+        broadcastToRoom(room.code, {
+          type: "EMOJI_THROWN",
+          ...payload,
+        });
+        break;
+      }
+    }
+
+    res.json({ success: true, room });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message || "Failed action" });
+  }
+});
+
+// WebSocket Server with Persistent Heartbeat Keep-Alive
 const wss = new WebSocketServer({ server });
 
-wss.on("connection", (ws) => {
+// Keep-alive heartbeat loop every 20s to prevent Cloud Run proxy / NAT timeouts
+const heartbeatInterval = setInterval(() => {
+  wss.clients.forEach((ws: any) => {
+    if (ws.isAlive === false) {
+      try {
+        ws.terminate();
+      } catch (e) {}
+      return;
+    }
+    ws.isAlive = false;
+    try {
+      ws.ping();
+    } catch (e) {}
+  });
+}, 20000);
+
+wss.on("close", () => {
+  clearInterval(heartbeatInterval);
+});
+
+wss.on("connection", (ws: any) => {
+  ws.isAlive = true;
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
+
   activeSockets.set(ws, {});
 
   ws.on("message", (data) => {

@@ -52,6 +52,8 @@ class HybridNetworkManager {
 
   // Initialize WebSocket with auto-reconnect and fallback
   private reconnectTimer: any = null;
+  private pingTimer: any = null;
+  private roomPollTimer: any = null;
 
   private initWebSocket() {
     try {
@@ -69,6 +71,16 @@ class HybridNetworkManager {
         this.isConnectedWs = true;
         this.emit('CONNECTIVITY_CHANGED', { mode: 'websocket', online: true });
         
+        // Start ping interval
+        clearInterval(this.pingTimer);
+        this.pingTimer = setInterval(() => {
+          if (this.ws && this.ws.readyState === WebSocket.OPEN) {
+            try {
+              this.ws.send(JSON.stringify({ type: 'PING' }));
+            } catch (e) {}
+          }
+        }, 15000);
+
         // If in a room, re-join/re-sync
         if (this.localRoomCode && this.myPlayerId) {
           this.ws?.send(
@@ -102,15 +114,48 @@ class HybridNetworkManager {
 
       this.ws.onclose = () => {
         this.isConnectedWs = false;
-        // Schedule auto-reconnect after 3 seconds
+        clearInterval(this.pingTimer);
+        // Schedule auto-reconnect after 2.5 seconds
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = setTimeout(() => {
           this.initWebSocket();
-        }, 3000);
+        }, 2500);
       };
     } catch (e) {
       this.isConnectedWs = false;
     }
+  }
+
+  // Start background room sync poller (fallback for cross-network and mobile connection drops)
+  private startRoomPoller(roomCode: string) {
+    clearInterval(this.roomPollTimer);
+    this.roomPollTimer = setInterval(async () => {
+      if (!this.localRoomCode || this.localRoomCode !== roomCode) {
+        clearInterval(this.roomPollTimer);
+        return;
+      }
+      try {
+        const res = await fetch(`/api/rooms/${roomCode}`);
+        if (res.ok) {
+          const data = await res.json();
+          if (data && data.room) {
+            const serverRoom: GameRoom = data.room;
+            // Only update if server has newer action or state differs
+            if (!this.currentRoom || serverRoom.lastActionTime > (this.currentRoom.lastActionTime || 0)) {
+              this.currentRoom = serverRoom;
+              this.emit(
+                serverRoom.status === 'playing' ? 'GAME_STARTED' : 'ROOM_UPDATED',
+                { room: serverRoom }
+              );
+            }
+          }
+        }
+      } catch (err) {}
+    }, 2000);
+  }
+
+  private stopRoomPoller() {
+    clearInterval(this.roomPollTimer);
   }
 
   // Initialize PeerJS for Serverless WebRTC P2P
@@ -355,7 +400,18 @@ class HybridNetworkManager {
     });
   }
 
-  // Create a new room (Hybrid WebSocket & Serverless P2P)
+  // Helper to send action via REST if needed
+  private async postAction(roomCode: string, type: string, payload: any) {
+    try {
+      await fetch('/api/rooms/action', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ roomCode, type, payload }),
+      });
+    } catch (e) {}
+  }
+
+  // Create a new room (Hybrid WebSocket + Centralized Server DB + WebRTC)
   public async createRoom(params: {
     name: string;
     mode: RoomMode;
@@ -402,7 +458,25 @@ class HybridNetworkManager {
 
     this.currentRoom = initialRoom;
 
-    // Try WebSocket if connected
+    // 1. Immediately register on Central Server DB via REST
+    try {
+      await fetch('/api/rooms/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          code,
+          name: initialRoom.name,
+          mode: initialRoom.mode,
+          bet: initialRoom.bet,
+          hostPlayer: params.hostPlayer,
+          boardTheme: initialRoom.boardTheme,
+        }),
+      });
+    } catch (err) {
+      console.warn('REST create room warning:', err);
+    }
+
+    // 2. Register over WebSocket
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(
         JSON.stringify({
@@ -417,9 +491,14 @@ class HybridNetworkManager {
           },
         })
       );
+    } else {
+      this.initWebSocket();
     }
 
-    // Always initialize PeerJS host for reliable direct P2P connections on Vercel
+    // 3. Start background sync poller
+    this.startRoomPoller(code);
+
+    // 4. Initialize PeerJS host for direct P2P connections
     try {
       await this.initPeerHost(code);
     } catch (err) {
@@ -430,7 +509,7 @@ class HybridNetworkManager {
     return initialRoom;
   }
 
-  // Join an existing room (Hybrid WebSocket & Serverless P2P)
+  // Join an existing room (Dual-Stack Centralized Server + WebSocket + WebRTC)
   public async joinRoom(
     roomCode: string,
     player: Omit<RoomPlayer, 'color'>,
@@ -441,7 +520,34 @@ class HybridNetworkManager {
     this.isHost = false;
     this.myPlayerId = player.id;
 
-    // 1. Try WebSocket first if active
+    // 1. Try Central Server DB via REST first for instantaneous verification
+    try {
+      const res = await fetch('/api/rooms/join', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          roomCode: formattedCode,
+          player,
+          isSpectator: asSpectator,
+        }),
+      });
+
+      if (res.ok) {
+        const data = await res.json();
+        if (data && data.room) {
+          this.currentRoom = data.room;
+          this.startRoomPoller(formattedCode);
+          this.emit(
+            data.room.status === 'playing' ? 'GAME_STARTED' : 'ROOM_UPDATED',
+            { room: data.room, isSpectator: data.isSpectator }
+          );
+        }
+      }
+    } catch (err) {
+      console.warn('REST join warning:', err);
+    }
+
+    // 2. Connect & register over WebSocket
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(
         JSON.stringify({
@@ -454,15 +560,14 @@ class HybridNetworkManager {
           },
         })
       );
-      return true;
+    } else {
+      this.initWebSocket();
     }
 
-    // 2. Connect via WebRTC P2P (PeerJS)
-    return new Promise((resolve) => {
-      if (this.peer && !this.peer.destroyed) {
-        this.peer.destroy();
-      }
+    this.startRoomPoller(formattedCode);
 
+    // 3. Connect via WebRTC P2P (PeerJS) as secondary channel
+    try {
       const clientPeer = new Peer({
         config: {
           iceServers: [
@@ -489,7 +594,6 @@ class HybridNetworkManager {
               isSpectator: asSpectator,
             },
           });
-          resolve(true);
         });
 
         conn.on('data', (data: any) => {
@@ -500,27 +604,10 @@ class HybridNetworkManager {
             this.emit(data.type as NetworkEventType, data);
           }
         });
-
-        conn.on('error', (err) => {
-          console.warn('P2P Client conn error:', err);
-          this.emit('ERROR', { message: 'تعذر الاتصال بالغرفة، تأكد من صحة الكود أو أن المضيف متصل.' });
-          resolve(false);
-        });
       });
+    } catch (e) {}
 
-      clientPeer.on('error', (err) => {
-        console.warn('P2P Peer error:', err);
-        this.emit('ERROR', { message: 'الغرفة غير موجودة أو انتهت صلاحيتها.' });
-        resolve(false);
-      });
-
-      // Timeout fallback
-      setTimeout(() => {
-        if (!this.hostConnection) {
-          resolve(false);
-        }
-      }, 6000);
-    });
+    return true;
   }
 
   // Start game (Host only)
@@ -534,6 +621,8 @@ class HybridNetworkManager {
           payload: { roomCode },
         })
       );
+    } else {
+      this.postAction(roomCode, 'START_GAME', {});
     }
 
     if (this.isHost) {
@@ -594,6 +683,8 @@ class HybridNetworkManager {
           payload,
         })
       );
+    } else {
+      this.postAction(roomCode, 'ROLL_DICE', payload);
     }
 
     if (this.isHost) {
@@ -648,6 +739,8 @@ class HybridNetworkManager {
           payload,
         })
       );
+    } else {
+      this.postAction(roomCode, 'MOVE_PAWN', payload);
     }
 
     if (this.isHost) {
@@ -682,6 +775,8 @@ class HybridNetworkManager {
           payload,
         })
       );
+    } else {
+      this.postAction(roomCode, 'PASS_TURN', payload);
     }
 
     if (this.isHost) {
@@ -731,6 +826,8 @@ class HybridNetworkManager {
           payload: { roomCode, message },
         })
       );
+    } else {
+      this.postAction(roomCode, 'CHAT_MESSAGE', { message });
     }
 
     if (this.isHost) {
@@ -764,6 +861,8 @@ class HybridNetworkManager {
           payload,
         })
       );
+    } else {
+      this.postAction(roomCode, 'EMOJI_INTERACTION', payload);
     }
 
     if (this.isHost) {
@@ -839,6 +938,7 @@ class HybridNetworkManager {
 
   // Leave room cleanly
   public leaveRoom(roomCode: string, playerId: string, isSpectator: boolean = false) {
+    this.stopRoomPoller();
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(
         JSON.stringify({
@@ -866,6 +966,7 @@ class HybridNetworkManager {
     }
 
     this.currentRoom = null;
+    this.localRoomCode = '';
     this.isHost = false;
   }
 }
