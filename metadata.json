@@ -1,0 +1,8 @@
+{
+  "name": "Remix Ludo Royale Online",
+  "description": "لعبة لودو أونلاين حقيقية مع غرف خاصة، محادثة فورية، متجر سكنات، نظام مكافآت وترتيب عالمي.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
