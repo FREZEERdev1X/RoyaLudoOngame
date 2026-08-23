@@ -216,6 +216,11 @@ export default function App() {
             const amSpectator = !!serverRoom.spectators?.some((s) => s.id === user.id);
             setIsSpectator(amSpectator);
 
+            const me = serverRoom.players?.find((p) => p.id === user.id);
+            if (me && me.color) {
+              setMyColor(me.color);
+            }
+
             if (serverRoom.mode) {
               setPlayerMode(serverRoom.mode);
             }

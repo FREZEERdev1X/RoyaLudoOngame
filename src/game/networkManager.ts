@@ -157,22 +157,46 @@ class HybridNetworkManager {
     }
   }
 
-  // Start background room sync poller (fallback for cross-network and mobile connection drops)
+  // Helper to normalize room code (handle Arabic numerals, spaces, lowercase)
+  public normalizeCode(code: string): string {
+    if (!code) return '';
+    const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+    let cleaned = code.trim().toUpperCase();
+    for (let i = 0; i < 10; i++) {
+      cleaned = cleaned.split(arabicDigits[i]).join(i.toString());
+    }
+    return cleaned.replace(/[^A-Z0-9]/gi, '');
+  }
+
+  // Start background room sync poller (ultra-fast fallback for cross-network and mobile connection drops)
   private startRoomPoller(roomCode: string) {
     clearInterval(this.roomPollTimer);
+    const cleanCode = this.normalizeCode(roomCode);
     this.roomPollTimer = setInterval(async () => {
-      if (!this.localRoomCode || this.localRoomCode !== roomCode) {
+      if (!this.localRoomCode || this.localRoomCode !== cleanCode) {
         clearInterval(this.roomPollTimer);
         return;
       }
       try {
-        const res = await fetch(`/api/rooms/${roomCode}`);
+        const res = await fetch(`/api/rooms/${cleanCode}`);
         if (res.ok) {
           const data = await res.json();
           if (data && data.room) {
             const serverRoom: GameRoom = data.room;
-            // Only update if server has newer action or state differs
-            if (!this.currentRoom || serverRoom.lastActionTime > (this.currentRoom.lastActionTime || 0)) {
+            const current = this.currentRoom;
+            
+            const isDifferent =
+              !current ||
+              serverRoom.lastActionTime > (current.lastActionTime || 0) ||
+              serverRoom.players.length !== current.players.length ||
+              (serverRoom.spectators?.length || 0) !== (current.spectators?.length || 0) ||
+              serverRoom.status !== current.status ||
+              serverRoom.currentTurnColor !== current.currentTurnColor ||
+              serverRoom.diceValue !== current.diceValue ||
+              serverRoom.hasRolled !== current.hasRolled ||
+              (serverRoom.winners?.length || 0) !== (current.winners?.length || 0);
+
+            if (isDifferent) {
               this.currentRoom = serverRoom;
               this.emit(
                 serverRoom.status === 'playing' ? 'GAME_STARTED' : 'ROOM_UPDATED',
@@ -182,7 +206,7 @@ class HybridNetworkManager {
           }
         }
       } catch (err) {}
-    }, 2000);
+    }, 800);
   }
 
   private stopRoomPoller() {
@@ -547,7 +571,7 @@ class HybridNetworkManager {
     player: Omit<RoomPlayer, 'color'>,
     asSpectator: boolean = false
   ): Promise<{ success: boolean; message?: string; room?: GameRoom }> {
-    const formattedCode = roomCode.trim().toUpperCase();
+    const formattedCode = this.normalizeCode(roomCode);
     this.localRoomCode = formattedCode;
     this.isHost = false;
     this.myPlayerId = player.id;

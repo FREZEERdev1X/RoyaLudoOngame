@@ -576,15 +576,18 @@ app.post("/api/rooms/create", (req, res) => {
 app.post("/api/rooms/join", (req, res) => {
   try {
     const { roomCode, player, isSpectator } = req.body;
-    const room = rooms.get(roomCode?.toUpperCase());
+    const cleanCode = roomCode?.trim().toUpperCase();
+    const room = rooms.get(cleanCode);
     if (!room) {
-      return res.status(404).json({ error: "الغرفة غير موجودة أو انتهت صلاحيتها." });
+      return res.status(404).json({ error: "الغرفة غير موجودة أو انتهت صلاحيتها. تأكد من صحة الرمز." });
     }
 
     if (!room.spectators) room.spectators = [];
 
     const maxPlayers = room.mode === "2p" ? 2 : room.mode === "3p" ? 3 : 4;
     const shouldSpectate = Boolean(isSpectator || room.status !== "waiting" || room.players.length >= maxPlayers);
+
+    room.lastActionTime = Date.now();
 
     if (shouldSpectate) {
       if (!room.spectators.some((s) => s.id === player.id)) {
@@ -596,6 +599,12 @@ app.post("/api/rooms/join", (req, res) => {
           joinedAt: Date.now(),
         });
       }
+      broadcastToRoom(room.code, { 
+        type: room.status === "playing" ? "GAME_STARTED" : "ROOM_UPDATED", 
+        room, 
+        isSpectator: true,
+        notification: `👁️ انضم ${player.name} إلى المشاهدة.`
+      });
       return res.json({ success: true, room, isSpectator: true });
     }
 
@@ -616,9 +625,21 @@ app.post("/api/rooms/join", (req, res) => {
         color: assignedColor,
         isReady: true,
       });
+    } else {
+      // Update existing player details
+      room.players[existingIndex] = {
+        ...room.players[existingIndex],
+        ...player,
+        isReady: true,
+      };
     }
 
-    broadcastToRoom(room.code, { type: "ROOM_UPDATED", room });
+    broadcastToRoom(room.code, { 
+      type: "ROOM_UPDATED", 
+      room, 
+      isSpectator: false,
+      notification: `🎮 انضم ${player.name} إلى الغرفة!`
+    });
     res.json({ success: true, room, isSpectator: false });
   } catch (err: any) {
     res.status(500).json({ error: err.message || "Failed to join room" });
@@ -853,14 +874,16 @@ wss.on("connection", (ws: any) => {
 
         case "JOIN_ROOM": {
           const { roomCode, player } = payload;
+          const cleanCode = roomCode ? roomCode.trim().toUpperCase() : "";
           const isSpectator = Boolean(payload.isSpectator || payload.asSpectator);
-          const room = rooms.get(roomCode);
+          const room = rooms.get(cleanCode);
           if (!room) {
             ws.send(JSON.stringify({ type: "ERROR", message: "الغرفة غير موجودة أو انتهت صلاحيتها." }));
             return;
           }
 
           if (!room.spectators) room.spectators = [];
+          room.lastActionTime = Date.now();
 
           // Case 1: Joining as Spectator explicitly OR room is already playing/full
           const maxPlayers = room.mode === "2p" ? 2 : room.mode === "3p" ? 3 : 4;
@@ -876,11 +899,11 @@ wss.on("connection", (ws: any) => {
               });
             }
 
-            if (!socketsByRoom.has(roomCode)) {
-              socketsByRoom.set(roomCode, new Map());
+            if (!socketsByRoom.has(cleanCode)) {
+              socketsByRoom.set(cleanCode, new Map());
             }
-            socketsByRoom.get(roomCode)!.set(player.id, ws);
-            activeSockets.set(ws, { roomId: roomCode, playerId: player.id, playerName: player.name, isSpectator: true });
+            socketsByRoom.get(cleanCode)!.set(player.id, ws);
+            activeSockets.set(ws, { roomId: cleanCode, playerId: player.id, playerName: player.name, isSpectator: true });
 
             // If room is already playing, send current game state so spectator jumps right into action
             if (room.status === "playing") {
@@ -889,8 +912,8 @@ wss.on("connection", (ws: any) => {
               ws.send(JSON.stringify({ type: "ROOM_UPDATED", room, isSpectator: true }));
             }
 
-            broadcastToRoom(roomCode, { 
-              type: "ROOM_UPDATED", 
+            broadcastToRoom(cleanCode, { 
+              type: room.status === "playing" ? "GAME_STARTED" : "ROOM_UPDATED", 
               room,
               notification: `👁️ انضم ${player.name} إلى وضع المشاهدة.` 
             });
@@ -917,15 +940,21 @@ wss.on("connection", (ws: any) => {
               color: assignedColor,
               isReady: true,
             });
+          } else {
+            room.players[existingIndex] = {
+              ...room.players[existingIndex],
+              ...player,
+              isReady: true,
+            };
           }
 
-          if (!socketsByRoom.has(roomCode)) {
-            socketsByRoom.set(roomCode, new Map());
+          if (!socketsByRoom.has(cleanCode)) {
+            socketsByRoom.set(cleanCode, new Map());
           }
-          socketsByRoom.get(roomCode)!.set(player.id, ws);
-          activeSockets.set(ws, { roomId: roomCode, playerId: player.id, playerName: player.name, isSpectator: false });
+          socketsByRoom.get(cleanCode)!.set(player.id, ws);
+          activeSockets.set(ws, { roomId: cleanCode, playerId: player.id, playerName: player.name, isSpectator: false });
 
-          broadcastToRoom(roomCode, { type: "ROOM_UPDATED", room });
+          broadcastToRoom(cleanCode, { type: "ROOM_UPDATED", room });
           break;
         }
 

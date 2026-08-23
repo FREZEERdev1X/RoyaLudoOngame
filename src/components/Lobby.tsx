@@ -90,6 +90,15 @@ export const Lobby: React.FC<LobbyProps> = ({
   const [isJoining, setIsJoining] = useState(false);
   const [joinError, setJoinError] = useState<string | null>(null);
 
+  const cleanRoomCode = (val: string) => {
+    const arabicDigits = ['٠', '١', '٢', '٣', '٤', '٥', '٦', '٧', '٨', '٩'];
+    let cleaned = val.trim().toUpperCase();
+    for (let i = 0; i < 10; i++) {
+      cleaned = cleaned.split(arabicDigits[i]).join(i.toString());
+    }
+    return cleaned.replace(/[^A-Z0-9]/gi, '');
+  };
+
   const handleCreateRoom = (e: React.FormEvent) => {
     e.preventDefault();
     sound.playClick();
@@ -105,13 +114,14 @@ export const Lobby: React.FC<LobbyProps> = ({
 
   const handleJoinRoom = async (e: React.FormEvent, asSpectator = false) => {
     e?.preventDefault();
-    if (!joinCodeInput.trim()) return;
+    const clean = cleanRoomCode(joinCodeInput);
+    if (!clean) return;
     sound.playClick();
     setIsJoining(true);
     setJoinError(null);
 
     try {
-      await onJoinPrivateRoom(joinCodeInput.trim().toUpperCase(), asSpectator);
+      await onJoinPrivateRoom(clean, asSpectator);
     } catch (err: any) {
       setJoinError(err?.message || 'تعذر الانضمام للغرفة. تأكد من صحة الرمز.');
     } finally {
