@@ -316,16 +316,37 @@ let leaderboards: LeaderboardEntry[] = [
   },
 ];
 
-// Helper to broadcast room state to all connected WS clients in room
+// Track SSE streaming clients per room
+const sseClientsByRoom = new Map<string, Set<express.Response>>();
+
+// Helper to broadcast room state to all connected WS clients and SSE streams in room
 function broadcastToRoom(roomCode: string, payload: any) {
-  const roomSockets = socketsByRoom.get(roomCode);
-  if (!roomSockets) return;
+  const code = roomCode.toUpperCase();
   const msg = JSON.stringify(payload);
-  roomSockets.forEach((ws) => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.send(msg);
-    }
-  });
+
+  // 1. Broadcast to WebSockets
+  const roomSockets = socketsByRoom.get(code);
+  if (roomSockets) {
+    roomSockets.forEach((ws) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(msg);
+        } catch (e) {}
+      }
+    });
+  }
+
+  // 2. Broadcast to Server-Sent Events (SSE) subscribers
+  const sseSet = sseClientsByRoom.get(code);
+  if (sseSet) {
+    sseSet.forEach((res) => {
+      try {
+        res.write(`data: ${msg}\n\n`);
+      } catch (e) {
+        sseSet.delete(res);
+      }
+    });
+  }
 }
 
 // REST API Endpoints
@@ -611,6 +632,51 @@ app.get("/api/rooms/:code", (req, res) => {
     return res.status(404).json({ error: "الغرفة غير موجودة" });
   }
   res.json({ room });
+});
+
+// SSE (Server-Sent Events) Stream Endpoint for Instant Push without WS limits
+app.get("/api/rooms/:code/stream", (req, res) => {
+  const roomCode = req.params.code.toUpperCase();
+  const room = rooms.get(roomCode);
+  
+  if (!room) {
+    return res.status(404).json({ error: "Room not found" });
+  }
+
+  // Set SSE Headers
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.flushHeaders?.();
+
+  if (!sseClientsByRoom.has(roomCode)) {
+    sseClientsByRoom.set(roomCode, new Set());
+  }
+  sseClientsByRoom.get(roomCode)!.add(res);
+
+  // Send initial room snapshot
+  res.write(`data: ${JSON.stringify({ type: room.status === "playing" ? "GAME_STARTED" : "ROOM_UPDATED", room })}\n\n`);
+
+  // Keep connection open with comment heartbeat every 15s
+  const pinger = setInterval(() => {
+    try {
+      res.write(": ping\n\n");
+    } catch (e) {
+      clearInterval(pinger);
+    }
+  }, 15000);
+
+  req.on("close", () => {
+    clearInterval(pinger);
+    const set = sseClientsByRoom.get(roomCode);
+    if (set) {
+      set.delete(res);
+      if (set.size === 0) {
+        sseClientsByRoom.delete(roomCode);
+      }
+    }
+  });
 });
 
 // Generic REST Action Fallback for Room Events (Dual-Stack Reliability)
@@ -1039,27 +1105,11 @@ wss.on("connection", (ws: any) => {
   ws.on("close", () => {
     const info = activeSockets.get(ws);
     if (info && info.roomId && info.playerId) {
-      const room = rooms.get(info.roomId);
-      if (room) {
-        if (socketsByRoom.has(info.roomId)) {
-          socketsByRoom.get(info.roomId)!.delete(info.playerId);
-        }
-
-        if (info.isSpectator && room.spectators) {
-          room.spectators = room.spectators.filter((s) => s.id !== info.playerId);
-          broadcastToRoom(info.roomId, { type: "ROOM_UPDATED", room });
-        } else if (room.status === "waiting") {
-          room.players = room.players.filter((p) => p.id !== info.playerId);
-          if (room.players.length === 0 && (!room.spectators || room.spectators.length === 0)) {
-            rooms.delete(info.roomId);
-          } else {
-            if (room.hostId === info.playerId && room.players.length > 0) {
-              room.hostId = room.players[0].id;
-            }
-            broadcastToRoom(info.roomId, { type: "ROOM_UPDATED", room });
-          }
-        }
+      if (socketsByRoom.has(info.roomId)) {
+        socketsByRoom.get(info.roomId)!.delete(info.playerId);
       }
+      // Note: Do not immediately destroy the room or remove player on transient WS drops,
+      // as players may reconnect or communicate via SSE / REST Polling!
     }
     activeSockets.delete(ws);
   });

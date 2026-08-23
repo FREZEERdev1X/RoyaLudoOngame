@@ -22,6 +22,7 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
   onLeaveRoom,
 }) => {
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const t = translations[lang];
 
   const isHost = room.hostId === myPlayerId && !isSpectator;
@@ -34,6 +35,27 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
     navigator.clipboard.writeText(room.code);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
+  };
+
+  const handleCopyInviteLink = () => {
+    sound.playClick();
+    const inviteUrl = `${window.location.origin}${window.location.pathname}?room=${room.code}`;
+    
+    if (navigator.share) {
+      navigator.share({
+        title: `تحدي لودو رويال - غرفة ${room.name}`,
+        text: `انضم إلي في لعبة لودو رويال! رمز الغرفة: ${room.code}`,
+        url: inviteUrl,
+      }).catch(() => {
+        navigator.clipboard.writeText(inviteUrl);
+        setCopiedLink(true);
+        setTimeout(() => setCopiedLink(false), 2500);
+      });
+    } else {
+      navigator.clipboard.writeText(inviteUrl);
+      setCopiedLink(true);
+      setTimeout(() => setCopiedLink(false), 2500);
+    }
   };
 
   return (
@@ -71,6 +93,10 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
                 {room.mode.toUpperCase()} MATCH
               </span>
               <span className="text-xs text-slate-400">غرفة خاصة</span>
+              <span className="bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 text-[10px] font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-ping"></span>
+                <span>سيرفر سحابي مباشر 🌐</span>
+              </span>
               {spectators.length > 0 && (
                 <span className="bg-purple-500/20 border border-purple-500/40 text-purple-300 text-xs font-bold px-2 py-0.5 rounded-full flex items-center gap-1">
                   <Eye size={12} />
@@ -81,21 +107,38 @@ export const WaitingRoom: React.FC<WaitingRoomProps> = ({
             <h2 className="text-xl font-black text-white mt-1">{room.name}</h2>
           </div>
 
-          {/* Copyable Room Code */}
-          <div className="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded-2xl p-2 px-3 shadow-inner">
-            <div className="text-start">
-              <div className="text-[10px] text-slate-400 font-bold uppercase">{t.roomCode}</div>
-              <div className="text-lg font-black text-amber-400 tracking-widest">{room.code}</div>
+          {/* Copyable Room Code & Invite Link Button */}
+          <div className="flex flex-col sm:flex-row items-center gap-2">
+            <div className="flex items-center gap-2 bg-slate-950 border border-slate-700 rounded-2xl p-2 px-3 shadow-inner">
+              <div className="text-start">
+                <div className="text-[10px] text-slate-400 font-bold uppercase">{t.roomCode}</div>
+                <div className="text-lg font-black text-amber-400 tracking-widest">{room.code}</div>
+              </div>
+              <button
+                onClick={handleCopyCode}
+                className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
+                title={t.copyCode}
+              >
+                {copied ? <Check size={18} className="text-emerald-400" /> : <Copy size={18} />}
+              </button>
             </div>
+
             <button
-              onClick={handleCopyCode}
-              className="p-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors"
-              title={t.copyCode}
+              onClick={handleCopyInviteLink}
+              className="py-2.5 px-3.5 rounded-2xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs flex items-center gap-1.5 shadow-md border border-emerald-400/40 transition-transform active:scale-95 whitespace-nowrap"
+              title="نسخ رابط الدعوة المباشر"
             >
-              {copied ? <Check size={18} className="text-emerald-400" /> : <Copy size={18} />}
+              {copiedLink ? <Check size={16} className="text-emerald-200" /> : <span>🔗</span>}
+              <span>{copiedLink ? 'تم نسخ الرابط!' : 'نسخ رابط الدعوة'}</span>
             </button>
           </div>
         </div>
+
+        {copiedLink && (
+          <div className="mt-3 bg-emerald-500/20 border border-emerald-500/40 rounded-xl p-2 text-center text-xs text-emerald-300 font-semibold animate-pulse">
+            ✅ تم نسخ رابط الدعوة المباشر! أرسله لصديقك على واتساب أو أي تطبيق ليدخل الغرفة فوراً بنقرة واحدة.
+          </div>
+        )}
 
         {/* Bet Pool Info */}
         <div className="bg-amber-500/10 border border-amber-500/20 rounded-2xl p-3 my-4 flex items-center justify-between">

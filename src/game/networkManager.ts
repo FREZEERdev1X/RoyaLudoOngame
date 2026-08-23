@@ -54,6 +54,37 @@ class HybridNetworkManager {
   private reconnectTimer: any = null;
   private pingTimer: any = null;
   private roomPollTimer: any = null;
+  private eventSource: EventSource | null = null;
+
+  // Start SSE stream for instant server push without WebSocket limits
+  private startRoomStream(roomCode: string) {
+    if (typeof window === 'undefined' || typeof EventSource === 'undefined') return;
+    try {
+      if (this.eventSource) {
+        this.eventSource.close();
+        this.eventSource = null;
+      }
+      this.eventSource = new EventSource(`/api/rooms/${roomCode}/stream`);
+      this.eventSource.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data);
+          if (data && data.type) {
+            if (data.room) {
+              this.currentRoom = data.room;
+            }
+            this.emit(data.type as NetworkEventType, data);
+          }
+        } catch (e) {}
+      };
+    } catch (e) {}
+  }
+
+  private stopRoomStream() {
+    if (this.eventSource) {
+      this.eventSource.close();
+      this.eventSource = null;
+    }
+  }
 
   private initWebSocket() {
     try {
@@ -495,7 +526,8 @@ class HybridNetworkManager {
       this.initWebSocket();
     }
 
-    // 3. Start background sync poller
+    // 3. Start background SSE stream & sync poller
+    this.startRoomStream(code);
     this.startRoomPoller(code);
 
     // 4. Initialize PeerJS host for direct P2P connections
@@ -514,13 +546,16 @@ class HybridNetworkManager {
     roomCode: string,
     player: Omit<RoomPlayer, 'color'>,
     asSpectator: boolean = false
-  ): Promise<boolean> {
+  ): Promise<{ success: boolean; message?: string; room?: GameRoom }> {
     const formattedCode = roomCode.trim().toUpperCase();
     this.localRoomCode = formattedCode;
     this.isHost = false;
     this.myPlayerId = player.id;
 
     // 1. Try Central Server DB via REST first for instantaneous verification
+    let joinedViaRest = false;
+    let joinedRoomData: GameRoom | null = null;
+
     try {
       const res = await fetch('/api/rooms/join', {
         method: 'POST',
@@ -535,7 +570,10 @@ class HybridNetworkManager {
       if (res.ok) {
         const data = await res.json();
         if (data && data.room) {
+          joinedViaRest = true;
+          joinedRoomData = data.room;
           this.currentRoom = data.room;
+          this.startRoomStream(formattedCode);
           this.startRoomPoller(formattedCode);
           this.emit(
             data.room.status === 'playing' ? 'GAME_STARTED' : 'ROOM_UPDATED',
@@ -564,9 +602,10 @@ class HybridNetworkManager {
       this.initWebSocket();
     }
 
+    this.startRoomStream(formattedCode);
     this.startRoomPoller(formattedCode);
 
-    // 3. Connect via WebRTC P2P (PeerJS) as secondary channel
+    // 3. Connect via WebRTC P2P (PeerJS) as secondary cross-network channel
     try {
       const clientPeer = new Peer({
         config: {
@@ -574,6 +613,9 @@ class HybridNetworkManager {
             { urls: 'stun:stun.l.google.com:19302' },
             { urls: 'stun:stun1.l.google.com:19302' },
             { urls: 'stun:stun2.l.google.com:19302' },
+            { urls: 'stun:stun3.l.google.com:19302' },
+            { urls: 'stun:stun4.l.google.com:19302' },
+            { urls: 'stun:global.stun.twilio.com:3478' },
           ],
         },
       });
@@ -607,7 +649,22 @@ class HybridNetworkManager {
       });
     } catch (e) {}
 
-    return true;
+    if (joinedViaRest && joinedRoomData) {
+      return { success: true, room: joinedRoomData };
+    }
+
+    // Wait a brief 1.2s for P2P / Polling response if REST returned 404
+    return new Promise((resolve) => {
+      setTimeout(() => {
+        if (this.currentRoom) {
+          resolve({ success: true, room: this.currentRoom });
+        } else {
+          const errMsg = 'لم يتم العثور على الغرفة. تأكد من صحة الرمز وأن منشئ الغرفة متصل حالياً.';
+          this.emit('ERROR', { message: errMsg });
+          resolve({ success: false, message: errMsg });
+        }
+      }, 1200);
+    });
   }
 
   // Start game (Host only)
@@ -938,6 +995,7 @@ class HybridNetworkManager {
 
   // Leave room cleanly
   public leaveRoom(roomCode: string, playerId: string, isSpectator: boolean = false) {
+    this.stopRoomStream();
     this.stopRoomPoller();
     if (this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(

@@ -72,15 +72,29 @@ export const Lobby: React.FC<LobbyProps> = ({
     };
     fetchRooms();
     const interval = setInterval(fetchRooms, 4000);
+
+    // Auto-detect room query param in URL (?room=... or ?join=...)
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomParam = urlParams.get('room') || urlParams.get('join') || urlParams.get('code');
+      if (roomParam) {
+        setJoinCodeInput(roomParam.trim().toUpperCase());
+        setActiveTab('private');
+      }
+    } catch (e) {}
+
     return () => clearInterval(interval);
   }, []);
 
   const [isCreating, setIsCreating] = useState(false);
+  const [isJoining, setIsJoining] = useState(false);
+  const [joinError, setJoinError] = useState<string | null>(null);
 
   const handleCreateRoom = (e: React.FormEvent) => {
     e.preventDefault();
     sound.playClick();
     setIsCreating(true);
+    setJoinError(null);
     onCreatePrivateRoom(
       roomNameInput.trim() || `غرفة ${user.name}`,
       selectedMode,
@@ -89,11 +103,20 @@ export const Lobby: React.FC<LobbyProps> = ({
     setTimeout(() => setIsCreating(false), 2000);
   };
 
-  const handleJoinRoom = (e: React.FormEvent) => {
-    e.preventDefault();
+  const handleJoinRoom = async (e: React.FormEvent, asSpectator = false) => {
+    e?.preventDefault();
     if (!joinCodeInput.trim()) return;
     sound.playClick();
-    onJoinPrivateRoom(joinCodeInput.trim().toUpperCase());
+    setIsJoining(true);
+    setJoinError(null);
+
+    try {
+      await onJoinPrivateRoom(joinCodeInput.trim().toUpperCase(), asSpectator);
+    } catch (err: any) {
+      setJoinError(err?.message || 'تعذر الانضمام للغرفة. تأكد من صحة الرمز.');
+    } finally {
+      setTimeout(() => setIsJoining(false), 1500);
+    }
   };
 
   return (
@@ -497,7 +520,7 @@ export const Lobby: React.FC<LobbyProps> = ({
             </form>
 
             {/* Join by Code Box */}
-            <form onSubmit={handleJoinRoom} className="bg-slate-800/50 border border-slate-700 rounded-2xl p-4 sm:p-5 flex flex-col justify-between">
+            <form onSubmit={(e) => handleJoinRoom(e, false)} className="bg-slate-800/50 border border-slate-700 rounded-2xl p-4 sm:p-5 flex flex-col justify-between">
               <div>
                 <div className="flex items-center justify-between mb-4">
                   <div className="flex items-center gap-2 text-emerald-400 font-black text-sm">
@@ -516,11 +539,21 @@ export const Lobby: React.FC<LobbyProps> = ({
                     type="text"
                     required
                     value={joinCodeInput}
-                    onChange={(e) => setJoinCodeInput(e.target.value.toUpperCase())}
+                    onChange={(e) => {
+                      setJoinCodeInput(e.target.value.toUpperCase());
+                      setJoinError(null);
+                    }}
                     placeholder="مثال: A7K9X2"
                     maxLength={10}
                     className="w-full bg-slate-800 border border-slate-700 rounded-xl px-3 py-2.5 text-center text-base tracking-widest uppercase font-black text-amber-300 placeholder-slate-500 focus:outline-none focus:border-emerald-400"
                   />
+                  
+                  {joinError && (
+                    <div className="mt-2 p-2.5 rounded-xl bg-red-500/20 border border-red-500/40 text-red-300 text-xs text-center font-bold animate-shake">
+                      ⚠️ {joinError}
+                    </div>
+                  )}
+
                   <p className="text-[11px] text-slate-400 mt-2">
                     اطلب رمز الغرفة من صديقك للانضمام للعب معه، أو ادخل كـ <b className="text-purple-300">مشاهد (Spectator)</b> لمتابعة المباراة مباشرة دون المشاركة!
                   </p>
@@ -531,23 +564,28 @@ export const Lobby: React.FC<LobbyProps> = ({
                 {/* Join as Player button */}
                 <button
                   type="submit"
-                  disabled={!joinCodeInput.trim()}
+                  disabled={!joinCodeInput.trim() || isJoining}
                   className="flex-1 py-3 rounded-xl bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 text-slate-950 font-black text-xs sm:text-sm shadow-md transition-transform active:scale-95 flex items-center justify-center gap-1.5"
                   id="submit-join-room-btn"
                 >
-                  <LogIn size={15} />
-                  <span>انضمام كلاعب 🎮</span>
+                  {isJoining ? (
+                    <>
+                      <span className="w-4 h-4 border-2 border-slate-950 border-t-transparent rounded-full animate-spin"></span>
+                      <span>جارٍ الاتصال...</span>
+                    </>
+                  ) : (
+                    <>
+                      <LogIn size={15} />
+                      <span>انضمام كلاعب 🎮</span>
+                    </>
+                  )}
                 </button>
 
                 {/* Join as Spectator button */}
                 <button
                   type="button"
-                  disabled={!joinCodeInput.trim()}
-                  onClick={() => {
-                    if (!joinCodeInput.trim()) return;
-                    sound.playClick();
-                    onJoinPrivateRoom(joinCodeInput.trim().toUpperCase(), true);
-                  }}
+                  disabled={!joinCodeInput.trim() || isJoining}
+                  onClick={(e) => handleJoinRoom(e, true)}
                   className="py-3 px-4 rounded-xl bg-purple-600/90 hover:bg-purple-600 disabled:opacity-50 text-white font-bold text-xs sm:text-sm shadow-md transition-transform active:scale-95 flex items-center justify-center gap-1.5 border border-purple-400/30"
                   id="submit-spectate-room-btn"
                 >

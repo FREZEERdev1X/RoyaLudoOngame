@@ -152,6 +152,18 @@ export default function App() {
     if (!saved) {
       setIsGoogleAuthOpen(true);
     }
+
+    // Auto-detect room parameter in URL (?room=... or ?join=...)
+    try {
+      const urlParams = new URLSearchParams(window.location.search);
+      const roomParam = urlParams.get('room') || urlParams.get('join') || urlParams.get('code');
+      if (roomParam && roomParam.trim().length >= 4) {
+        const cleanCode = roomParam.trim().toUpperCase();
+        setTimeout(() => {
+          handleJoinPrivateRoom(cleanCode, false).catch(() => {});
+        }, 500);
+      }
+    } catch (e) {}
   }, []);
 
   // Sync user state with localStorage and live global leaderboard
@@ -974,7 +986,7 @@ export default function App() {
     setIsSpectator(asSpectator);
     sound.playClick();
 
-    networkManager.joinRoom(
+    const result = await networkManager.joinRoom(
       code.toUpperCase(),
       {
         id: user.id,
@@ -985,6 +997,11 @@ export default function App() {
       },
       asSpectator
     );
+
+    if (!result.success) {
+      throw new Error(result.message || 'تعذر الانضمام للغرفة.');
+    }
+    return result;
   };
 
   // Start VS Bot Match
